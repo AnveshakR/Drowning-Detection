@@ -2,13 +2,14 @@
 import argparse
 import sys
 import time
-
+import numpy as np
 import cv2
 from tflite_support.task import core
 from tflite_support.task import processor
 from tflite_support.task import vision
 import utils
 
+import calibrate as calibration
 
 def run(model: str, source: int, width: int, height: int, num_threads: int, calibrate: bool) -> None:
     """Continuously run inference on images acquired from the camera.
@@ -22,11 +23,30 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
     calibrate: Set the detection area
     """
 
+    try:
+        f = open("ref.txt", "r")
+    except FileNotFoundError:
+        calibration_handler(source, width, height)
+
+
     if calibrate:
-        calibrator(source, width, height)
+        calibration_handler(source, width, height)
+
+
+    f = open("ref.txt", "r")
+    detection_zone = [line.rstrip() for line in f]
+    detection_zone = [list(map(int, i.strip().split(','))) for i in detection_zone]
+    detection_zone = np.array(detection_zone, np.int32)
+    print("detection_zone", detection_zone)
+    f.close()
+
+    detection_zone = detection_zone.reshape((-1, 1, 2))
+
+    real_count = 0
+    expect_count = 0
 
     # Variables to calculate FPS
-    counter, fps = 0, 0
+    fps_counter, fps = 0, 0
     start_time = time.time()
 
     # Start capturing video input from the camera
@@ -60,8 +80,8 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
           )
 
         image = cv2.resize(image, (640,480), cv2.INTER_AREA)
-
-        counter += 1
+        image = cv2.polylines(image, [detection_zone], True, (255, 0, 0), 3)
+        fps_counter += 1
 
         # Convert the image from BGR to RGB as required by the TFLite model.
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -75,14 +95,21 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
         for object in detection_result.detections:
             if object.categories[0].category_name == "person":
                 b_box = object.bounding_box
-                cv2.circle(image, ((b_box.origin_x+b_box.width//2), (b_box.origin_y+b_box.height//2)), 5, (255,0,0), -1)
-                #print(object.bounding_box.origin_x)
+                center = [(b_box.origin_x+b_box.width//2), (b_box.origin_y+b_box.height//2)]
 
-        # Draw keypoints and edges on input image
-        image = utils.visualize(image, detection_result)
+                position = cv2.pointPolygonTest(detection_zone, center, False)
+
+                if position == 1:
+                    real_count += 1
+                elif position == 0:
+                    real_count -= 1
+
+                cv2.circle(image, center, 5, (255,0,0), -1)
+                cv2.putText(image, str(position), (center[0]+5,center[1]), cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
+
 
         # Calculate the FPS
-        if counter % fps_avg_frame_count == 0:
+        if fps_counter % fps_avg_frame_count == 0:
             end_time = time.time()
             fps = fps_avg_frame_count / (end_time - start_time)
             start_time = time.time()
@@ -101,7 +128,7 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
     cap.release()
     cv2.destroyAllWindows()
 
-def calibrator(source, width, height):
+def calibration_handler(source, width, height):
     cap = cv2.VideoCapture(source)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
@@ -116,27 +143,12 @@ def calibrator(source, width, height):
         cv2.imshow("output", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q' or 'Q'):
+            cap.release()
             cv2.destroyAllWindows()
             break
 
-    cnt = 0
-
-    def click_event(event, x, y, flags, params):
-
-        global cnt
-        if cnt == 3:
-            cv2.destroyAllWindows()
-
-        if event == cv2.EVENT_LBUTTONDOWN:
-            cnt += 1
-            print(x, y)
-
-    cv2.imshow("image", frame)
-    cv2.setMouseCallback("image", click_event)
-    cv2.waitKey(0)
-    cnt = 0
-
-
+    calibration.main(frame)
+    print("hi")
 
 def main():
     parser = argparse.ArgumentParser(
