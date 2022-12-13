@@ -1,12 +1,12 @@
 import argparse
 import sys
-import time
 import numpy as np
 import cv2
 from tflite_support.task import core
 from tflite_support.task import processor
 from tflite_support.task import vision
 import utils
+from time import time
 
 import calibrate as calibration
 
@@ -44,9 +44,11 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
     real_count = 0 # keeps track of people actually in detection zone
     expected_count = 0 # keeps track of the number of people who are supposed to be in the detection zone
 
+    missing_person_flag = False # flag activates if number of people in frame is less than expected
+
     # Variables to calculate FPS
     fps_counter, fps = 0, 0
-    start_time = time.time()
+    start_time = time()
 
     # Start capturing video input from the camera
     cap = cv2.VideoCapture(source)
@@ -124,11 +126,27 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
         cv2.putText(image, "Real-time count: {}".format(real_count), (0, 460), cv2.FONT_HERSHEY_PLAIN, font_size, (0,0,0), font_thickness)
         cv2.putText(image, "Expected count:  {}".format(expected_count), (0, 470), cv2.FONT_HERSHEY_PLAIN, font_size, (0,0,0), font_thickness)
 
+
+        if real_count < expected_count and not missing_person_flag: # if number of people detected less than expected, activate drowning flag and start caution timer
+            missing_person_flag = True
+            caution_timer = time()
+            print("\ntimer on")
+
+        if real_count >= expected_count and missing_person_flag: # if flag was activated, but number of people comes back to normal,
+            missing_person_flag = False                          # deactivate flag
+            print("\ntimer off")
+
+        if missing_person_flag:
+            print(round(time()-caution_timer))
+            if round(time() - caution_timer) >= 10: # if flag is activated and timer reaches 10s, send an alarm saying possible drowning incident
+                print("\nPerson Missing!!")
+
+
         # Calculate the FPS
         if fps_counter % fps_avg_frame_count == 0:
-            end_time = time.time()
+            end_time = time()
             fps = fps_avg_frame_count / (end_time - start_time)
-            start_time = time.time()
+            start_time = time()
 
         # Show the FPS
         fps_text = 'FPS = {:.1f}'.format(fps)
