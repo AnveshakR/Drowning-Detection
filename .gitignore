@@ -1,0 +1,6 @@
+*.mp4
+*.tflite
+test_data
+__pycache__
+iot
+ref.txt

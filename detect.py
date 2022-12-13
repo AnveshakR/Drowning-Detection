@@ -1,4 +1,3 @@
-"""Main script to run the object detection routine."""
 import argparse
 import sys
 import time
@@ -12,8 +11,7 @@ import utils
 import calibrate as calibration
 
 def run(model: str, source: int, width: int, height: int, num_threads: int, calibrate: bool) -> None:
-    """Continuously run inference on images acquired from the camera.
-
+    """
     Args:
     model: Name of the TFLite object detection model.
     source: Source link to perform detection on.
@@ -23,27 +21,28 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
     calibrate: Set the detection area
     """
 
+    # opening file with reference points for the detection zone
     try:
         f = open("ref.txt", "r")
-    except FileNotFoundError:
+    except FileNotFoundError: # if the file is not found, run calibration
         calibration_handler(source, width, height)
+    else:
+        f.close()
 
-
-    if calibrate:
+    if calibrate: # if calibration flag is triggered, run calibration
         calibration_handler(source, width, height)
 
 
     f = open("ref.txt", "r")
     detection_zone = [line.rstrip() for line in f]
-    detection_zone = [list(map(int, i.strip().split(','))) for i in detection_zone]
+    detection_zone = [list(map(int, i.strip().split(','))) for i in detection_zone] # parsing string array to list
     detection_zone = np.array(detection_zone, np.int32)
-    print("detection_zone", detection_zone)
     f.close()
 
-    detection_zone = detection_zone.reshape((-1, 1, 2))
+    expand_dz, contract_dz = polygonscale(detection_zone) # getting expanded and contracted detection zone for demarkation of entry/exit
 
-    real_count = 0
-    expect_count = 0
+    real_count = 0 # keeps track of people actually in detection zone
+    expected_count = 0 # keeps track of the number of people who are supposed to be in the detection zone
 
     # Variables to calculate FPS
     fps_counter, fps = 0, 0
@@ -80,8 +79,15 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
           )
 
         image = cv2.resize(image, (640,480), cv2.INTER_AREA)
-        image = cv2.polylines(image, [detection_zone], True, (255, 0, 0), 3)
+
+        # displays detection zones on image
+        image = cv2.polylines(image, [detection_zone], True, (255, 0, 0), 2)
+        image = cv2.polylines(image, [expand_dz], True, (0, 0, 0), 1)
+        image = cv2.polylines(image, [contract_dz], True, (0, 0, 0), 1)
+
         fps_counter += 1
+
+        real_count = 0
 
         # Convert the image from BGR to RGB as required by the TFLite model.
         rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -93,20 +99,30 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
         detection_result = detector.detect(input_tensor)
 
         for object in detection_result.detections:
-            if object.categories[0].category_name == "person":
+            if object.categories[0].category_name == "person": # filtering for detections labelled "person"
                 b_box = object.bounding_box
-                center = [(b_box.origin_x+b_box.width//2), (b_box.origin_y+b_box.height//2)]
+                center = [(b_box.origin_x+b_box.width//2), (b_box.origin_y+b_box.height//2)] # getting center of bounding box
 
-                position = cv2.pointPolygonTest(detection_zone, center, False)
+                # if person is inside outer DZ, but outside actual DZ, person is entering DZ
+                if cv2.pointPolygonTest(expand_dz, center, False) == 1 and cv2.pointPolygonTest(detection_zone, center, False) == -1:
+                    expected_count += 1
 
-                if position == 1:
+                # if persion is outside inner DZ, but inside actual DZ, person is exiting DZ
+                if cv2.pointPolygonTest(contract_dz, center, False) == -1 and cv2.pointPolygonTest(detection_zone, center, False) == 1:
+                    expected_count -= 1
+
+                # counting people actually in DZ
+                if cv2.pointPolygonTest(detection_zone, center, False) == 1:
                     real_count += 1
-                elif position == 0:
-                    real_count -= 1
 
-                cv2.circle(image, center, 5, (255,0,0), -1)
-                cv2.putText(image, str(position), (center[0]+5,center[1]), cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
+                if expected_count < real_count:
+                    expected_count = real_count
 
+                cv2.circle(image, center, 5, (255,0,0), -1) # displays center of bounding box for visualization
+
+        # display real and expected counts on image
+        cv2.putText(image, "Real-time count: {}".format(real_count), (0, 460), cv2.FONT_HERSHEY_PLAIN, font_size, (0,0,0), font_thickness)
+        cv2.putText(image, "Expected count:  {}".format(expected_count), (0, 470), cv2.FONT_HERSHEY_PLAIN, font_size, (0,0,0), font_thickness)
 
         # Calculate the FPS
         if fps_counter % fps_avg_frame_count == 0:
@@ -128,27 +144,59 @@ def run(model: str, source: int, width: int, height: int, num_threads: int, cali
     cap.release()
     cv2.destroyAllWindows()
 
+# handles calibration
 def calibration_handler(source, width, height):
+
+    font_size = 1
+    font_thickness = 1
+
     cap = cv2.VideoCapture(source)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    frame = None
-    while(cap.isOpened()):
+    frame_copy = None
+    while(cap.isOpened()): # run selected source
         success, frame = cap.read()
 
         if frame is None:
             continue
 
         frame = cv2.resize(frame, (640, 480), cv2.INTER_AREA)
+        frame_copy = np.copy(frame)
+        cv2.putText(frame, "Press 'q' or 'Q' to select frame", (0, 470), cv2.FONT_HERSHEY_PLAIN, font_size, (0,0,255), font_thickness)
         cv2.imshow("output", frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q' or 'Q'):
+        if cv2.waitKey(1) & 0xFF == ord('q' or 'Q'): # if 'q' or 'Q' are pressed, stop video and save current frame
             cap.release()
             cv2.destroyAllWindows()
             break
 
-    calibration.main(frame)
-    print("hi")
+    calibration.main(frame_copy) # run calibration on selected frame
+
+def polygonscale(detection_zone): # used to scale 4 sided polygon
+    expand_dz = np.copy(detection_zone)
+    contract_dz = np.copy(detection_zone)
+
+    x = [i[0] for i in detection_zone]
+
+    for j in sorted(x)[2:]:
+        expand_dz[x.index(j)][0] += 10 # push out right end
+        contract_dz[x.index(j)][0] -= 10 # pull in right end
+
+    for j in sorted(x)[:2]:
+        expand_dz[x.index(j)][0] -= 10 # push out left end
+        contract_dz[x.index(j)][0] += 10 # pull in left end
+
+    y = [i[1] for i in detection_zone]
+
+    for j in sorted(y)[2:]:
+        expand_dz[y.index(j)][1] += 10 # push out top end
+        contract_dz[y.index(j)][1] -= 10 # pull in top end
+
+    for j in sorted(y)[:2]:
+        expand_dz[y.index(j)][1] -= 10 # push out bottom end
+        contract_dz[y.index(j)][1] += 10 # pull in bottom end
+
+    return expand_dz, contract_dz
 
 def main():
     parser = argparse.ArgumentParser(
